@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -48,12 +48,37 @@ class AlignRequest(BaseModel):
     max_false_a: int = Field(..., ge=0, le=3, description="A 芯伪环限额 0–3。")
     max_missing_b: int = Field(..., ge=0, le=3, description="B 芯缺环限额 0–3。")
     max_false_b: int = Field(..., ge=0, le=3, description="B 芯伪环限额 0–3。")
+    chronology_gaps: Optional[List[int]] = Field(
+        default=None,
+        min_length=1, max_length=5,
+        description="年表缺测项的零基下标（1–5 个），严格递增且位于年表"
+                    "范围内；缺测项不可匹配、可被两支树芯共同跨越，"
+                    "不耗缺环限额、不计跳环。省略时按无缺测处理。")
 
     @field_validator("chronology")
     @classmethod
     def _check_chronology(cls, v: List[int]) -> List[int]:
         if not 25 <= len(v) <= 60:
             raise ValueError("chronology 长度必须在 25 至 60 之间")
+        return v
+
+    @field_validator("chronology_gaps")
+    @classmethod
+    def _check_chronology_gaps(cls, v, info):
+        if v is None:
+            return v
+        # 年表先于本字段校验；其缺失 / 越界时已有独立报错，此处只做不依赖
+        # 年表长度的检查。
+        chron = info.data.get("chronology")
+        if any(b <= a for a, b in zip(v, v[1:])):
+            raise ValueError(
+                "chronology_gaps 必须严格递增，不得重复或乱序")
+        if chron is not None:
+            m = len(chron)
+            if any(j < 0 or j >= m for j in v):
+                raise ValueError(
+                    "chronology_gaps 下标必须位于年表范围内 "
+                    f"[0, {m - 1}]")
         return v
 
     @field_validator("sample_a", "sample_b")

@@ -140,5 +140,119 @@ def test_no_solution_shape():
     assert "shared_end_details" in ev
 
 
+# --------------------------------------------------------------------------- #
+# chronology_gaps
+# --------------------------------------------------------------------------- #
+
+def _gap_req(gaps=None, caps=(3, 3, 3, 3)):
+    chron = list(range(100, 130))
+    # 两芯真值共同终年 20、窗口跨缺测 12；B 另缺真实年表项 14。
+    # 样芯取值本身不含缺测年（缺测年只被跨越，不产生伪环）。
+    sa = [chron[i]
+          for i in [9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20]]
+    sb = [chron[i]
+          for i in [9, 10, 11, 13, 15, 16, 17, 18, 19, 20]]
+    p = dict(
+        chronology=chron, start_year=1990,
+        sample_a=sa, sample_b=sb,
+        tolerance_a=[0] * 11, tolerance_b=[0] * 10,
+        max_missing_a=caps[0], max_false_a=caps[1],
+        max_missing_b=caps[2], max_false_b=caps[3],
+    )
+    if gaps is not None:
+        p["chronology_gaps"] = gaps
+    return p
+
+
+def test_gap_alignment_ok():
+    # 缺测下标 12 落在两芯窗口内（9..20），可共同跨越；B 另有真实缺环 14。
+    r = client.post("/api/dendro/align", json=_gap_req([12]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "unique"
+    assert body["common_end_year"] == 2010
+    # 总跳环只计 B 的木材缺环，缺测跨越不计入。
+    assert body["objectives"]["total_skips"] == 1
+    ma, mb = body["mappings"]["a"], body["mappings"]["b"]
+    assert ma["missing_chronology_indices"] == []
+    assert ma["crossed_chronology_gap_indices"] == [12]
+    assert ma["crossed_chronology_gap_years"] == [2002]
+    assert mb["missing_chronology_indices"] == [14]
+    assert mb["crossed_chronology_gap_indices"] == [12]
+    # 缺测占位值绝不与任何环匹配。
+    for mp in (ma, mb):
+        assert 12 not in [m["chronology_index"] for m in mp["matched"]]
+    # 每份见证都分别列示实际跨过的缺测下标 / 年份。
+    for w in body["witnesses"]:
+        for key in ("a", "b"):
+            wm = w["mappings"][key]
+            assert wm["crossed_chronology_gap_indices"] == [12]
+            assert wm["crossed_chronology_gap_years"] == [2002]
+
+
+def test_gap_omitted_response_has_no_gap_fields():
+    r = client.post("/api/dendro/align", json=_gap_req())
+    assert r.status_code == 200
+    mp = r.json()["mappings"]["a"]
+    assert "crossed_chronology_gap_indices" not in mp
+    assert "crossed_chronology_gap_years" not in mp
+
+
+def test_gap_year_conversion_continuous():
+    r = client.post("/api/dendro/align", json=_gap_req([12]))
+    matched = r.json()["mappings"]["a"]["matched"]
+    for m in matched:
+        assert m["year"] == 1990 + m["chronology_index"]
+
+
+def test_gap_duplicate_index_422():
+    r = client.post("/api/dendro/align", json=_gap_req([12, 12]))
+    assert r.status_code == 422
+    body = r.json()
+    assert body["status"] == "validation_error"
+    locs = [tuple(e["loc"]) for e in body["errors"]]
+    assert ("body", "chronology_gaps") in locs
+
+
+def test_gap_unsorted_index_422():
+    r = client.post("/api/dendro/align", json=_gap_req([15, 12]))
+    assert r.status_code == 422
+    assert ("body", "chronology_gaps") in {
+        tuple(e["loc"]) for e in r.json()["errors"]}
+
+
+def test_gap_out_of_range_422():
+    r = client.post("/api/dendro/align", json=_gap_req([30]))
+    assert r.status_code == 422
+    assert "chronology_gaps" in r.text
+
+
+def test_gap_negative_index_422():
+    r = client.post("/api/dendro/align", json=_gap_req([-1]))
+    assert r.status_code == 422
+
+
+def test_gap_empty_and_too_many_422():
+    r = client.post("/api/dendro/align", json=_gap_req([]))
+    assert r.status_code == 422
+    r = client.post("/api/dendro/align", json=_gap_req([1, 2, 3, 4, 5, 6]))
+    assert r.status_code == 422
+
+
+def test_gap_at_common_end_no_solution_evidence():
+    # 共同终年只能落在缺测项：no_solution，证据区分缺测与跳环。
+    r = client.post("/api/dendro/align", json=_gap_req([20]))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "no_solution"
+    ev = body["evidence"]
+    assert ev["reason"] == "common_end_blocked_by_gaps"
+    assert ev["chronology_gaps"]["indices"] == [20]
+    for side in ("a", "b"):
+        gev = ev["cores"][side]["chronology_gaps"]
+        assert gev[0]["chronology_index"] == 20
+        assert gev[0]["crossable_with_eight_matches"] is False
+
+
 def body_status(r):
     return r.json()["status"]

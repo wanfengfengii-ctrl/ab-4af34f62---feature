@@ -14,11 +14,13 @@ from app.alignment import align_joint, Mapping
 # 穷举参考实现
 # --------------------------------------------------------------------------- #
 
-def brute_paths(sample, chron, tol, miss_cap, false_cap, min_matches=8):
+def brute_paths(sample, chron, tol, miss_cap, false_cap, min_matches=8,
+                gaps=frozenset()):
     """穷举单芯所有合法映射：{end: [Mapping]}。
 
     映射即严格双增匹配对 (i_k, j_k)：首对 i_0=0、末对 i=n-1；
-    相邻对之间未匹配的样芯环为伪环、年表项为缺环。
+    相邻对之间未匹配的样芯环为伪环、真实年表项为缺环；
+    窗口内夹着的缺测项记入 gaps_crossed（资料缺口，不算缺环）。
     """
     n, m = len(sample), len(chron)
     out: dict[int, list[Mapping]] = {}
@@ -30,10 +32,16 @@ def brute_paths(sample, chron, tol, miss_cap, false_cap, min_matches=8):
         # 分支 1：把第 i 环当伪环跳过（首环与末环不允许）。
         if 0 < i < n - 1 and false_used < false_cap:
             rec(i + 1, j_lo, pairs, miss_used, false_used + 1)
-        # 分支 2：第 i 环匹配年表第 j 项。
+        # 分支 2：第 i 环匹配年表第 j 项（缺测项不允许匹配）。
         prev_j = pairs[-1][1] if pairs else None
         for j in range(j_lo, m):
-            add_miss = 0 if prev_j is None else j - prev_j - 1
+            if j in gaps:
+                continue
+            if prev_j is None:
+                add_miss = 0
+            else:
+                add_miss = sum(1 for q in range(prev_j + 1, j)
+                               if q not in gaps)
             if miss_used + add_miss > miss_cap:
                 break
             d = abs(sample[i] - chron[j])
@@ -46,9 +54,11 @@ def brute_paths(sample, chron, tol, miss_cap, false_cap, min_matches=8):
                 j0 = p[0][1]
                 all_false = tuple(
                     q for q in range(n) if q not in matched_i)
+                window = range(j0, j + 1)
                 all_miss = tuple(
-                    q for q in range(j0, j + 1) if q not in matched_j)
-                mp = Mapping(tuple(p), all_miss, all_false)
+                    q for q in window if q not in matched_j and q not in gaps)
+                all_gaps = tuple(q for q in window if q in gaps)
+                mp = Mapping(tuple(p), all_miss, all_false, all_gaps)
                 if (mp.miss <= miss_cap and mp.fls <= false_cap
                         and len(p) >= min_matches):
                     out.setdefault(j, []).append(mp)
@@ -59,9 +69,10 @@ def brute_paths(sample, chron, tol, miss_cap, false_cap, min_matches=8):
     return out
 
 
-def brute_joint(sa, sb, chron, ta, tb, ma_c, fa_c, mb_c, fb_c):
-    pa = brute_paths(sa, chron, ta, ma_c, fa_c)
-    pb = brute_paths(sb, chron, tb, mb_c, fb_c)
+def brute_joint(sa, sb, chron, ta, tb, ma_c, fa_c, mb_c, fb_c,
+                gaps=frozenset()):
+    pa = brute_paths(sa, chron, ta, ma_c, fa_c, gaps=gaps)
+    pb = brute_paths(sb, chron, tb, mb_c, fb_c, gaps=gaps)
     best = None
     pairs_opt = []
     for e in sorted(set(pa) & set(pb)):
@@ -78,8 +89,8 @@ def brute_joint(sa, sb, chron, ta, tb, ma_c, fa_c, mb_c, fb_c):
 
 
 def make_payload(chron, sa, sb, ta=None, tb=None, tol=2, start_year=2000,
-                 caps=(3, 3, 3, 3)):
-    return dict(
+                 caps=(3, 3, 3, 3), gaps=None):
+    p = dict(
         chronology=chron, start_year=start_year,
         sample_a=sa, sample_b=sb,
         tolerance_a=[tol] * len(sa) if ta is None else ta,
@@ -87,6 +98,9 @@ def make_payload(chron, sa, sb, ta=None, tb=None, tol=2, start_year=2000,
         max_missing_a=caps[0], max_false_a=caps[1],
         max_missing_b=caps[2], max_false_b=caps[3],
     )
+    if gaps is not None:
+        p["chronology_gaps"] = list(gaps)
+    return p
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +270,43 @@ def test_tiebreak_max_diff_before_sum():
 
 
 # --------------------------------------------------------------------------- #
+# 末段紧邻跳环（回归：枚举器必须支持伪环 / 缺环恰好位于末对之前）
+# --------------------------------------------------------------------------- #
+
+def test_false_ring_immediately_before_last_pair():
+    """倒数第二个样芯环是伪环（尾段伪环），映射仍须被精确枚举。"""
+    chron = list(range(100, 140))
+    # A：前 8 环对年表 3..10，第 9 环伪环 999，末环对年表 11（共 10 环）。
+    sa = [chron[i] for i in range(3, 11)] + [999, chron[11]]
+    assert len(sa) == 10
+    sb = chron[2:12]                      # 10 环精确落在 2..11，终年 11
+    res = align_joint(make_payload(chron, sa, sb, ta=[0] * 10, tb=[0] * 10,
+                                   caps=(3, 1, 0, 0)))
+    assert res["status"] == "unique"
+    assert res["common_end_year"] == 2011
+    ma = res["mappings"]["a"]
+    assert ma["false_sample_rings"] == [9]    # 1 基的倒数第二环
+    assert ma["missing_chronology_indices"] == []
+    assert ma["match_count"] == 9
+
+
+def test_missing_immediately_before_common_end():
+    """末环对前恰好缺两个真实年表项（尾段缺环），映射仍须被精确枚举。"""
+    chron = list(range(100, 140))
+    sa = [chron[i] for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 11]]
+    sb = chron[2:12]
+    res = align_joint(make_payload(chron, sa, sb, ta=[0] * 10, tb=[0] * 10,
+                                   caps=(2, 0, 0, 0)))
+    assert res["status"] == "unique"
+    assert res["common_end_year"] == 2011
+    ma = res["mappings"]["a"]
+    assert ma["missing_chronology_indices"] == [9, 10]
+    assert ma["false_sample_rings"] == []
+    assert ma["match_count"] == 10
+    assert res["objectives"]["total_skips"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # 穷举对照（随机小规模）
 # --------------------------------------------------------------------------- #
 
@@ -361,4 +412,223 @@ def test_witnesses_payload_internal_consistency():
             assert mp["difference_sum"] == sum(
                 m["difference"] for m in mp["matched"])
         # 两芯终年一致
+        assert w["mappings"]["a"]["end_year"] == w["mappings"]["b"]["end_year"]
+
+
+# --------------------------------------------------------------------------- #
+# chronology_gaps（年表缺测项）
+# --------------------------------------------------------------------------- #
+
+def test_gap_crossed_free_and_reported():
+    """缺测项可被两芯共同跨越，不耗缺环限额、不计跳环，并分别列示。"""
+    chron = list(range(100, 140))
+    # A 连续 12 环覆盖下标 0..11（跨缺测 5）；B 另有真实缺环 8。
+    sa = [chron[i] for i in [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12]]
+    sb = [chron[i] for i in [0, 1, 2, 3, 4, 6, 7, 9, 10, 11, 12]]
+    res = align_joint(make_payload(chron, sa, sb, ta=[0] * 12, tb=[0] * 11,
+                                   gaps=[5]))
+    assert res["status"] == "unique"
+    assert res["common_end_year"] == 2012
+    # 总跳环只计木材缺环（B 的 [8]），缺测跨越不计入。
+    assert res["objectives"] == {
+        "total_skips": 1, "max_difference": 0, "difference_sum": 0}
+    ma, mb = res["mappings"]["a"], res["mappings"]["b"]
+    assert ma["missing_chronology_indices"] == []
+    assert ma["crossed_chronology_gap_indices"] == [5]
+    assert ma["crossed_chronology_gap_years"] == [2005]
+    assert ma["crossed_gap_count"] == 1
+    assert mb["missing_chronology_indices"] == [8]
+    assert mb["crossed_chronology_gap_indices"] == [5]
+    assert mb["crossed_gap_count"] == 1
+    # 每份同优见证都分别列示实际跨过的缺测下标 / 年份。
+    for w in res["witnesses"]:
+        assert w["mappings"]["a"]["crossed_chronology_gap_indices"] == [5]
+        assert w["mappings"]["b"]["crossed_chronology_gap_years"] == [2005]
+
+
+def test_gap_never_matched_and_year_continuous():
+    """缺测项不得匹配；日历年份按下标连续换算，不因缺测断开。"""
+    chron = list(range(100, 140))
+    sa = [chron[i] for i in [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10,
+                                   gaps=[5]))
+    assert res["status"] == "unique"
+    mp = res["mappings"]["a"]
+    idxs = [m["chronology_index"] for m in mp["matched"]]
+    assert 5 not in idxs
+    assert idxs == [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]
+    years = [m["year"] for m in mp["matched"]]
+    assert years == [2000 + j for j in idxs]
+    assert mp["crossed_chronology_gap_indices"] == [5]
+    assert mp["crossed_chronology_gap_years"] == [2005]
+
+
+def test_gap_outside_window_not_counted():
+    """首末匹配之外的缺测项既不匹配也不计入跨越。"""
+    chron = list(range(100, 130))
+    sa = chron[10:20]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10,
+                                   gaps=[5, 15, 25]))
+    assert res["status"] == "unique"
+    mp = res["mappings"]["a"]
+    assert mp["crossed_chronology_gap_indices"] == [15]
+    assert mp["missing_chronology_indices"] == []
+
+
+def test_gap_immediately_before_common_end():
+    """共同终年前一个位置是缺测项：可跨越，且不再需要任何真实跳环。"""
+    chron = list(range(100, 140))
+    # 前 10 环落下标 0..9，末环落 11，中间只夹缺测 10（无真实缺环）。
+    sa = [chron[i] for i in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 11, tb=[0] * 11,
+                                   gaps=[10], caps=(0, 0, 0, 0)))
+    assert res["status"] == "unique"
+    assert res["objectives"]["total_skips"] == 0
+    mp = res["mappings"]["a"]
+    assert mp["missing_chronology_indices"] == []
+    assert mp["crossed_chronology_gap_indices"] == [10]
+    assert mp["end_year"] == 2011
+
+
+def test_gap_with_real_missing_over_cap_returns_no_solution():
+    """跨越缺测不解决真实缺环：真值还缺真实年，超限额仍 no_solution。"""
+    chron = list(range(100, 140))
+    # 真值窗口跨缺测 5，且两芯各自还缺真实年表项 3（共需 1 个真实缺环）。
+    sa = [chron[i] for i in [0, 1, 2, 4, 6, 7, 8, 9, 10, 11]]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10,
+                                   gaps=[5], caps=(0, 3, 0, 3)))
+    assert res["status"] == "no_solution"
+    assert res["evidence"]["reason"] == "skip_limits_exceeded"
+    # 证据中年表缺测与木材跳环分开说明。
+    detail = res["evidence"]["shared_end_details"][0]["a"]
+    assert detail["total_skips"] == 1          # 只含木材缺环
+    assert detail["chronology_gap_indices"] == [5]
+    assert detail["chronology_gap_count"] == 1
+    assert detail["within_limits"] is False
+    # 缺测 5 在放宽窗口内可跨越（失败原因是真实缺环限额，不是缺测本身）。
+    gap_ev = res["evidence"]["cores"]["a"]["chronology_gaps"]
+    assert gap_ev == [{
+        "chronology_index": 5, "year": 2005,
+        "crossable_with_eight_matches": True}]
+
+    # 放宽缺环限额到 1 后可解：缺测跨越仍不计入跳环。
+    res2 = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10,
+                                    gaps=[5], caps=(1, 3, 1, 3)))
+    assert res2["status"] == "unique"
+    assert res2["objectives"]["total_skips"] == 2
+    mp = res2["mappings"]["a"]
+    assert mp["missing_chronology_indices"] == [3]
+    assert mp["crossed_chronology_gap_indices"] == [5]
+
+
+def test_gap_at_common_end_blocks_and_reports_gaps_separately():
+    """共同终年只能落在缺测项：no_solution + 缺口与跳环分列的两芯证据。"""
+    chron = list(range(100, 130))
+    sa = chron[0:10]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10,
+                                   gaps=[9]))
+    assert res["status"] == "no_solution"
+    assert res["evidence"]["reason"] == "common_end_blocked_by_gaps"
+    assert res["evidence"]["chronology_gaps"] == {
+        "indices": [9], "years": [2009]}
+    # 末环候选不含缺测年。
+    assert 2009 not in res["evidence"]["cores"]["a"][
+        "last_ring_candidate_years"]
+    for side in ("a", "b"):
+        assert res["evidence"]["cores"][side]["chronology_gaps"] == [{
+            "chronology_index": 9, "year": 2009,
+            "crossable_with_eight_matches": False}]
+
+
+def test_gap_not_in_response_when_omitted():
+    """省略 chronology_gaps 时响应形状保持旧版（无任何 gap 字段）。"""
+    chron = list(range(100, 130))
+    sa = chron[0:10]
+    res = align_joint(make_payload(chron, sa, sa[:], ta=[0] * 10, tb=[0] * 10))
+    mp = res["mappings"]["a"]
+    assert "crossed_chronology_gap_indices" not in mp
+    assert "crossed_chronology_gap_years" not in mp
+    assert "crossed_gap_count" not in mp
+    assert res["evidence"] is None
+
+
+def test_gap_omitted_same_inputs_identical_objectives():
+    """同一输入无缺测时，加与不加不存在的缺口结果等价。"""
+    chron = [100 + (i * 7) % 50 for i in range(30)]
+    sa = [chron[i] for i in range(9, 20)]
+    sb = [chron[i] for i in [9, 10, 12, 13, 14, 15, 16, 17, 18, 19]]
+    p = make_payload(chron, sa, sb, ta=[0] * 11, tb=[0] * 10)
+    r1 = align_joint(p)
+    p2 = dict(p); p2["chronology_gaps"] = [28]   # 落在窗口外
+    r2 = align_joint(p2)
+    assert r1["objectives"] == r2["objectives"]
+    assert r1["common_end_year"] == r2["common_end_year"]
+    assert r2["mappings"]["a"]["crossed_chronology_gap_indices"] == []
+    assert r2["mappings"]["b"]["crossed_chronology_gap_indices"] == []
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_random_gap_cases_match_bruteforce(seed):
+    """含 1–3 个缺测项的随机算例：与穷举参考逐目标值、逐见证对照。"""
+    rng = random.Random(seed)
+    m = 26
+    chron = [rng.randint(0, 9) for _ in range(m)]
+    gaps = frozenset(rng.sample(range(2, m - 2), rng.randint(1, 3)))
+
+    def make_core():
+        n = 10
+        start = rng.randint(0, m - n - 4)
+        idx = list(range(start, start + n))
+        miss = rng.randint(0, 2)
+        for _ in range(miss):
+            if idx[-1] + 1 < m:
+                k = rng.randint(1, len(idx) - 2)
+                idx = idx[:k] + [x + 1 for x in idx[k:]]
+        vals = [chron[j] + rng.choice([-1, 0, 1]) for j in idx]
+        false = rng.randint(0, 2)
+        for _ in range(false):
+            k = rng.randint(1, len(vals) - 1)
+            vals.insert(k, rng.randint(0, 9))
+        tol = [rng.randint(0, 2) for _ in vals]
+        return vals, tol
+
+    sa, ta = make_core()
+    sb, tb = make_core()
+    if len(sa) < 10 or len(sb) < 10:
+        return
+    p = dict(
+        chronology=chron, start_year=1900,
+        sample_a=sa, sample_b=sb, tolerance_a=ta, tolerance_b=tb,
+        max_missing_a=3, max_false_a=3, max_missing_b=3, max_false_b=3,
+        chronology_gaps=sorted(gaps),
+    )
+    best, opt_pairs = brute_joint(sa, sb, chron, ta, tb, 3, 3, 3, 3, gaps)
+    res = align_joint(p)
+    if best is None:
+        assert res["status"] == "no_solution"
+        return
+    assert res["status"] in ("unique", "ambiguous")
+    assert res["objectives"] == {
+        "total_skips": best[0],
+        "max_difference": best[1],
+        "difference_sum": best[2],
+    }
+    assert len(res["witnesses"]) == (1 if len(opt_pairs) == 1 else 2)
+    first = opt_pairs[0]
+    ga = tuple((mm["sample_ring"] - 1, mm["chronology_index"])
+               for mm in res["witnesses"][0]["mappings"]["a"]["matched"])
+    gb = tuple((mm["sample_ring"] - 1, mm["chronology_index"])
+               for mm in res["witnesses"][0]["mappings"]["b"]["matched"])
+    assert (ga, gb) == (first[0].sig, first[1].sig)
+    # 跨越缺测与穷举一致
+    ca = res["witnesses"][0]["mappings"]["a"]["crossed_chronology_gap_indices"]
+    cb = res["witnesses"][0]["mappings"]["b"]["crossed_chronology_gap_indices"]
+    assert ca == list(first[0].gaps_crossed)
+    assert cb == list(first[1].gaps_crossed)
+    # 缺环只含真实年表项、见证间终年一致
+    for w in res["witnesses"]:
+        for key in ("a", "b"):
+            mp = w["mappings"][key]
+            assert set(mp["missing_chronology_indices"]).isdisjoint(gaps)
+            assert set(mp["crossed_chronology_gap_indices"]) <= gaps
         assert w["mappings"]["a"]["end_year"] == w["mappings"]["b"]["end_year"]

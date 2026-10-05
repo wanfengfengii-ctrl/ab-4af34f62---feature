@@ -24,6 +24,28 @@
 - 缺环、伪环各不超过该支给定限额（0–3）；
 - 所有匹配差值不得越过逐环容差。
 
+### 年表缺测项（chronology_gaps，可选）
+
+数字化时少量年份只有占位值、不可用于比对。请求可选用 `chronology_gaps`
+给出 **1–5 个**严格递增、位于年表范围内的零基下标。缺测项：
+
+- **不得与任一树芯环匹配**（连候选位置都不是），也不能充当共同终年；
+- 位于某支首末匹配之间时可被该支**跨越**（两支共同跨过即“共同跨年”），
+  跨越是**资料缺口**而非木材缺环——**不消耗**任一芯的缺环限额，也**不计入**
+  第一级目标的总跳环、不影响后两级差值目标；
+- 日历年份仍按原年表下标连续换算（`start_year + 下标`），缺测年份照常给出。
+
+成功时每支映射及每份同优见证都分别给出实际跨过的缺测下标 / 年份
+（`crossed_chronology_gap_indices` / `crossed_chronology_gap_years`）；
+原有缺环列表只保留真实年表项。省略该字段时请求、响应与失败行为完全兼容
+旧版（不出现任何 gap 字段）。
+
+若共同终年只能落在缺测项，返回 `no_solution`（原因
+`common_end_blocked_by_gaps`）；若跨越缺测后木材缺环 / 伪环仍超过真实限额，
+仍按 `skip_limits_exceeded` 等返回。两类情形都在两芯证据中把**年表缺测**
+（`chronology_gap_indices` / `crossable_with_eight_matches`）与**木材跳环**
+（`missing` / `false` / `total_skips`）分开列示。
+
 优化目标按字典序：
 
 1. 两芯缺环与伪环**总数**最小；
@@ -57,7 +79,8 @@
   "max_missing_a": 3,
   "max_false_a": 3,
   "max_missing_b": 3,
-  "max_false_b": 3
+  "max_false_b": 3,
+  "chronology_gaps": [/* 可选：1–5 个严格递增、位于年表范围内的零基下标 */]
 }
 ```
 
@@ -78,6 +101,8 @@
       "missing_chronology_years": [2000],
       "missing_chronology_indices": [10],
       "false_sample_rings": [],
+      "_crossed_chronology_gap_indices": "仅在给出 chronology_gaps 时出现：实际跨过的缺测下标",
+      "_crossed_chronology_gap_years": "对应的缺测年份（按下标连续换算）",
       "missing_count": 1, "false_count": 0, "match_count": 10,
       "end_year": 2009,
       "max_difference": 0, "difference_sum": 0
@@ -100,7 +125,7 @@
   "objectives": null,
   "witnesses": [],
   "evidence": {
-    "reason": "last_ring_unmatchable | insufficient_matchable_rings | skip_limits_exceeded | no_common_end_year | common_end_requires_more_skips",
+    "reason": "last_ring_unmatchable | insufficient_matchable_rings | skip_limits_exceeded | no_common_end_year | common_end_requires_more_skips | common_end_blocked_by_gaps",
     "shared_candidate_years": [],
     "cores": {
       "a": { "feasible_within_limits": false, "...": "两支各自的终年候选、限额内外最少跳环数等" },
