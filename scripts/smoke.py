@@ -56,6 +56,35 @@ def case_no_solution() -> dict:
     return body
 
 
+def case_gap_crossed() -> dict:
+    # 年表缺测下标 11 落在两芯共同窗口内：真值跨过 11，不产生缺环。
+    chron = list(range(100, 130))
+    window = list(range(5, 11)) + list(range(12, 18))   # 12 环，终年 17
+    core = [chron[i] for i in window]
+    return dict(
+        chronology=chron, start_year=1990,
+        sample_a=core, sample_b=core[:],
+        tolerance_a=[0] * 12, tolerance_b=[0] * 12,
+        max_missing_a=3, max_false_a=3, max_missing_b=3, max_false_b=3,
+        chronology_gaps=[11],
+    )
+
+
+def case_gap_blocks_common_end() -> dict:
+    # A 终年 1909、B 终年 1917；放宽后共同终年 1917 要求 A 越过 7 个木材
+    # 缺环（缺测下标 13 可免费跨过但不抵缺环），超过限额 3 -> no_solution。
+    chron = list(range(100, 117)) + [109] + list(range(118, 140))
+    sa = [chron[i] for i in range(0, 10)]
+    sb = [chron[i] for i in range(8, 18)]
+    return dict(
+        chronology=chron, start_year=1900,
+        sample_a=sa, sample_b=sb,
+        tolerance_a=[0] * 10, tolerance_b=[0] * 10,
+        max_missing_a=3, max_false_a=3, max_missing_b=3, max_false_b=3,
+        chronology_gaps=[13],
+    )
+
+
 def main(base: str) -> int:
     # 1) 唯一解
     code, r = post(base, "/api/dendro/align", case_unique())
@@ -112,6 +141,48 @@ def main(base: str) -> int:
     assert "shared_end_details" in ev
     print("  [ok] 无解：原因 "
           f"{ev['reason']}，并给出两支树芯证据")
+
+    # 5) 年表缺测：缺测下标可免费跨过，不计缺环 / 跳环
+    code, r = post(base, "/api/dendro/align", case_gap_crossed())
+    assert code == 200, r
+    assert r["status"] == "unique", r
+    assert r["common_end_year"] == 2007, r
+    assert r["objectives"]["total_skips"] == 0, r
+    for side in ("a", "b"):
+        mp = r["mappings"][side]
+        assert mp["crossed_chronology_gap_indices"] == [11], side
+        assert mp["crossed_chronology_gap_years"] == [2001], side
+        assert mp["missing_chronology_indices"] == [], side
+        for w in r["witnesses"]:
+            assert w["mappings"][side]["crossed_chronology_gap_indices"] == [11]
+    print("  [ok] 年表缺测：免费跨过下标 11，不耗缺环、不计跳环")
+
+    # 6) 年表缺测 422：重复 / 乱序 / 越界
+    for bad_gaps, hint in (([11, 11], "重复"), ([12, 11], "乱序"),
+                           ([30], "越界")):
+        bad = case_gap_crossed()
+        bad["chronology_gaps"] = bad_gaps
+        code, r = post(base, "/api/dendro/align", bad)
+        assert code == 422, (bad_gaps, r)
+        assert r["status"] == "validation_error", r
+        assert any(e.get("loc", [None])[-1] == "chronology_gaps"
+                   for e in r["errors"]), r
+        print(f"  [ok] 缺测下标{hint}返回可定位的 422")
+
+    # 7) 共同终年只能靠超过真实缺环限额达成：no_solution，证据分列缺口与跳环
+    code, r = post(base, "/api/dendro/align", case_gap_blocks_common_end())
+    assert code == 200, r
+    assert r["status"] == "no_solution", r
+    ev = r["evidence"]
+    assert ev["reason"] == "common_end_requires_more_skips", ev
+    assert ev["chronology_gaps"]["indices"] == [13], ev
+    detail = next(d for d in ev["shared_end_details"]
+                  if d["chronology_index"] == 17)
+    assert detail["a"]["chronology_gaps_crossed"] == [13]
+    assert detail["a"]["missing"] == 7
+    assert detail["a"]["total_skips"] == 7
+    assert detail["a"]["within_limits"] is False
+    print("  [ok] 无解证据：年表缺测 [13] 与木材缺环 7 分列说明")
 
     print("\n冒烟全部通过。")
     return 0

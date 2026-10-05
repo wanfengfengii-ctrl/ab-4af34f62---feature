@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -12,11 +12,21 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator, model_valida
 from .alignment import align_joint
 
 
+# 模型级校验中可定位到具体字段的错误前缀；异常处理器据此修正 loc。
+_FIELD_PREFIX = "chronology_gaps:"
+
+
 def _sanitize_errors(errors: list[dict]) -> list[dict]:
     """Pydantic v2 的 ctx 可能携带不可 JSON 序列化的异常对象，统一清洗。"""
     clean = []
     for e in errors:
         item = {k: v for k, v in e.items() if k != "ctx"}
+        msg = str(item.get("msg", ""))
+        if _FIELD_PREFIX in msg:
+            # 跨字段校验失败时把错误定位到 chronology_gaps；
+            # Pydantic 会给 ValueError 加 "Value error, " 前缀，故用子串定位。
+            item["loc"] = ["body", "chronology_gaps"]
+            item["msg"] = msg.split(_FIELD_PREFIX, 1)[1].strip()
         ctx = e.get("ctx")
         if ctx:
             item["ctx"] = {
@@ -48,6 +58,10 @@ class AlignRequest(BaseModel):
     max_false_a: int = Field(..., ge=0, le=3, description="A 芯伪环限额 0–3。")
     max_missing_b: int = Field(..., ge=0, le=3, description="B 芯缺环限额 0–3。")
     max_false_b: int = Field(..., ge=0, le=3, description="B 芯伪环限额 0–3。")
+    chronology_gaps: Optional[List[int]] = Field(
+        None, min_length=1, max_length=5,
+        description="年表缺测项零基下标：1–5 个、严格递增、位于年表范围内；"
+                    "缺测项不可匹配，可在首末匹配之间免费跨过。")
 
     @field_validator("chronology")
     @classmethod
@@ -70,12 +84,29 @@ class AlignRequest(BaseModel):
             raise ValueError("逐环容差必须为非负整数")
         return v
 
+    @field_validator("chronology_gaps")
+    @classmethod
+    def _check_gap_values(cls, v: Optional[List[int]]) -> Optional[List[int]]:
+        if v is not None and any(x < 0 for x in v):
+            raise ValueError("chronology_gaps 下标必须为非负整数")
+        return v
+
     @model_validator(mode="after")
-    def _check_tol_lengths(self) -> "AlignRequest":
+    def _check_cross_fields(self) -> "AlignRequest":
         if len(self.tolerance_a) != len(self.sample_a):
             raise ValueError("tolerance_a 长度必须与 sample_a 相同")
         if len(self.tolerance_b) != len(self.sample_b):
             raise ValueError("tolerance_b 长度必须与 sample_b 相同")
+        gaps = self.chronology_gaps
+        if gaps is not None:
+            m = len(self.chronology)
+            if any(b <= a for a, b in zip(gaps, gaps[1:])):
+                # 同时覆盖重复（b == a）与乱序（b < a）。
+                raise ValueError(
+                    f"{_FIELD_PREFIX} 下标必须严格递增，不得重复或乱序")
+            if gaps[-1] >= m:
+                raise ValueError(
+                    f"{_FIELD_PREFIX} 下标越界：必须位于 [0, {m - 1}] 内")
         return self
 
 

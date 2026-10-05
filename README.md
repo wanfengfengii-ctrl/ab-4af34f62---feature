@@ -12,9 +12,10 @@
 
 | 动作 | 含义 |
 | --- | --- |
-| 匹配 `(i,j)→(i+1,j+1)` | 样芯第 `i` 环对入年表第 `j` 项，要求 `|sample[i]-chron[j]| ≤ tolerance[i]` |
+| 匹配 `(i,j)→(i+1,j+1)` | 样芯第 `i` 环对入年表第 `j` 项，要求 `j` 不是缺测下标且 `|sample[i]-chron[j]| ≤ tolerance[i]` |
 | 伪环 `(i,j)→(i+1,j)` | 跳过一个**样芯**环（年表中无对应年） |
-| 缺环 `(i,j)→(i,j+1)` | 跳过一个**年表**项（该年样芯缺轮） |
+| 缺环 `(i,j)→(i,j+1)` | 跳过一个**可用**年表项（该年样芯缺轮） |
+| 跨缺测 `(i,j)→(i,j+1)` | `j` 为缺测下标：同样推进年表，但免费、不占缺环限额、不计目标 |
 
 约束：
 
@@ -23,6 +24,17 @@
 - 首环与末环不允许被跳过，年表窗口前后的多余项不计缺环；
 - 缺环、伪环各不超过该支给定限额（0–3）；
 - 所有匹配差值不得越过逐环容差。
+
+年表缺测项（请求可选字段 `chronology_gaps`）：
+
+- 一至五个**严格递增**、位于年表范围内的零基下标，只有占位值、不可比对；
+- 缺测项**不得与任一样芯环匹配**（包括末环，故终年不能落在缺测项）；
+- 缺测项位于某支首末匹配之间时可被该支**跨过**：两支共同对入同一窗口，
+  资料缺口由两支联合跨越，推进年表但**不计缺环、不消耗缺环限额、
+  不计入三级目标的总跳环**；
+- 首匹配之前不允许推进年表，故首匹配之前的缺测项不会被“跨过”；
+- 日历年仍按原年表下标连续换算（缺测下标也占用日历年）；
+- 省略 `chronology_gaps` 时，请求、响应、裁决与失败行为完全保持兼容。
 
 优化目标按字典序：
 
@@ -57,13 +69,24 @@
   "max_missing_a": 3,
   "max_false_a": 3,
   "max_missing_b": 3,
-  "max_false_b": 3
+  "max_false_b": 3,
+  "chronology_gaps": [10, 14]
 }
 ```
 
+`chronology_gaps` 可省略；给出时须为 1–5 个严格递增且在年表下标范围
+`[0, len(chronology)-1]` 内的整数。下标重复、乱序或越界返回可定位的 422。
+
 ## 响应
 
-成功（HTTP 200）：
+成功（HTTP 200）。省略 `chronology_gaps` 时与既有响应结构完全一致；
+启用缺测后，每支映射（含每一份同优见证）额外分列：
+
+- `crossed_chronology_gap_indices` / `crossed_chronology_gap_years`：
+  该芯首末匹配之间**实际跨过**的年表缺测下标与对应日历年；
+- `crossed_gap_count`：跨过的缺测项数（恒不计入 `missing_count`
+  与 `objectives.total_skips`）；
+- 原 `missing_chronology_*` 只保留可用年表项上的木材缺环。
 
 ```json
 {
@@ -77,6 +100,9 @@
       ],
       "missing_chronology_years": [2000],
       "missing_chronology_indices": [10],
+      "crossed_chronology_gap_indices": [14],
+      "crossed_chronology_gap_years": [2004],
+      "crossed_gap_count": 1,
       "false_sample_rings": [],
       "missing_count": 1, "false_count": 0, "match_count": 10,
       "end_year": 2009,
@@ -85,7 +111,7 @@
     "b": { }
   },
   "objectives": {"total_skips": 1, "max_difference": 0, "difference_sum": 0},
-  "witnesses": [ /* 按映射序稳定的前两份同优见证 */ ],
+  "witnesses": [ /* 按映射序稳定的前两份同优见证，各自分列跨过缺测 */ ],
   "evidence": null
 }
 ```
@@ -106,10 +132,19 @@
       "a": { "feasible_within_limits": false, "...": "两支各自的终年候选、限额内外最少跳环数等" },
       "b": { }
     },
-    "shared_end_details": [ ]
+    "shared_end_details": [ ],
+    "chronology_gaps": null
   }
 }
 ```
+
+启用 `chronology_gaps` 且无解时，证据会把**年表缺测**与**木材跳环**
+分开：`evidence.chronology_gaps` 回显缺测下标 / 年份，
+`cores.*.min_chronology_gaps_crossed_with_eight_matches` 给出达标时至少
+跨过的缺测数，`shared_end_details[].a/b` 另含 `chronology_gaps_crossed`、
+`crossed_gap_years`、`crossed_gap_count`，而 `missing` / `false` /
+`total_skips` 只统计真实木材缺环与伪环。共同终年只能落在缺测项，或放宽
+缺测后仍需超过真实跳环限额时，返回 `no_solution`。
 
 输入越界返回 HTTP 422：
 
